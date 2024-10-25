@@ -31,6 +31,7 @@ example()
 
 async function example() {
 	const client = new Client({
+        timeout: 10000,
 		// Set to true if proxy is required
 		useInitialHost: true,
 		// Set the proxy ip and port
