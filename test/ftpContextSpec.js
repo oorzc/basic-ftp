@@ -29,6 +29,13 @@ describe("FTPContext", function() {
         assert.equal(old.destroyed, false);
     });
 
+    it("Setting new data socket destroys current", function() {
+        const old = ftp.dataSocket;
+        ftp.dataSocket = undefined;
+        //@ts-ignore that old might be undefined, it's never undefined here.
+        assert.equal(old.destroyed, true, "Socket destroyed.");
+    });
+
     it("Relays control socket timeout event", function(done) {
         ftp.handle(undefined, res => {
             assert.deepEqual(res, new Error("Timeout (control socket)"));
@@ -142,7 +149,7 @@ describe("FTPContext", function() {
     it("queues an error if no task is active and assigns it to the next task", function() {
         ftp.socket.emit("error", new Error("some error"));
         return ftp.handle("TEST", (res, task) => {
-            const err = new Error("Client is closed because some error (control socket)");
+            const err = new Error("Client is closed");
             err.code = 0;
             assert.deepEqual(res, err);
             assert.notEqual(-1, res.stack.indexOf("Closing reason: Error: some error (control socket)"));
@@ -166,5 +173,33 @@ describe("FTPContext", function() {
         return taskPromise.then(() => {
             assert.equal(c.socket.timeout, 0, "timeout after resolving task");
         });
+    });
+
+    it("reset set a new socket and clear connection info", function() {
+        const initialSocket = new SocketMock()
+        const c = new FTPContext(10000);
+        c.socket = initialSocket;
+        c._setupConnectedTo('host', 2121)
+
+        c.reset()
+
+        assert.notEqual(c.socket, initialSocket)
+        assert.equal(c.connectedTo.host, '')
+        assert.equal(c.connectedTo.port, 0)
+    });
+
+    it("_setupConnectedTo sets data correctly", function() {
+        const c = new FTPContext(10000);
+        c._setupConnectedTo('host', 2121)
+        assert.equal(c.connectedTo.host, 'host')
+        assert.equal(c.connectedTo.port, 2121)
+    });
+
+    it("_setupConnectedTo without params clears info", function() {
+        const c = new FTPContext(10000);
+        c._setupConnectedTo('host', 2121)
+        c._setupConnectedTo()
+        assert.equal(c.connectedTo.host, '')
+        assert.equal(c.connectedTo.port, 0)
     });
 });

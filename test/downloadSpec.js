@@ -1,154 +1,239 @@
 const assert = require("assert");
-const { Client } = require("../dist");
-const { StringWriter } = require("../dist/StringWriter");
-const MockFtpServer = require("./MockFtpServer");
-const { Writable } = require("stream")
-const fs = require("fs");
+const SocketMock = require("./SocketMock");
+const { Client, FileInfo, FileType, FTPError } = require("../dist");
+const fs = require("fs")
 
-const FILENAME = "file.txt"
-const TIMEOUT = 1000
-const EMPTY_TEXT = ""
-const SHORT_TEXT = "Short"
-const MEDIUM_TEXT = "s".repeat(45017) // https://github.com/patrickjuchli/basic-ftp/issues/205
-const LONG_TEXT = `Als Gregor Samsa eines Morgens aus unruhigen Träumen erwachte, fand er sich
-in seinem Bett zu einem ungeheueren Ungeziefer verwandelt. Er lag auf seinem
-panzerartig harten Rücken und sah, wenn er den Kopf ein wenig hob, seinen
-gewölbten, braunen, von bogenförmigen Versteifungen geteilten Bauch, auf dessen
-Höhe sich die Bettdecke, zum gänzlichen Niedergleiten bereit, kaum noch erhalten
-konnte. Seine vielen, im Vergleich zu seinem sonstigen Umfang kläglich dünnen
-Beine flimmerten ihm hilflos vor den Augen.`.repeat(2000)
+/**
+ * Downloading a directory listing uses the same mechanism as downloading in general,
+ * we don't need to repeat all tests for downloading files.
+ */
+describe("Download directory listing", function() {
+    this.timeout(100);
+    var f;
+    const bufList = Buffer.from("12-05-96  05:03PM       <DIR>          myDir");
+    const expList = [
+        (f = new FileInfo("myDir"),
+        f.size = 0,
+        f.date = "12-05-96 05:03PM",
+        f.type = FileType.Directory,
+        f)
+    ];
 
-describe("Download to stream", function() {
+    let client;
+    beforeEach(function() {
+        client = new Client(5000)
+        client.prepareTransfer = ftp => {
+            //@ts-ignore that SocketMock can't be assigned to client.ftp
+            ftp.dataSocket = new SocketMock();
+            //@ts-ignore
+            ftp.dataSocket.connect()
+            return Promise.resolve({code: 200, message: "OK"});
+        };
+        //@ts-ignore
+        client.ftp.socket = new SocketMock();
+    });
 
-    this.beforeEach(() => {
-        this.payload = SHORT_TEXT
-        this.client = new Client(TIMEOUT)
-        this.server = new MockFtpServer()
-        this.server.addHandlers({
-            "pasv": () => `227 Entering Passive Mode (${this.server.dataAddressForPasvResponse})`,
-            "retr": ({arg}) => {
-                setTimeout(() => {
-                    this.server.dataConn.write(this.payload)
-                    this.server.dataConn.end()
-                })
-                return arg === FILENAME ? "150 Ready to download" : "500 Wrong filename"
-            }
-        })
-        return this.client.access({
-            port: this.server.ctrlAddress.port,
-            user: "test",
-            password: "test"
-        })
-    })
+    afterEach(function() {
+        client.close();
+    });
 
-    this.afterEach(() => {
-        this.client.close()
-        this.server.close()
-    })
-
-    const testPayloads = [ EMPTY_TEXT, SHORT_TEXT, MEDIUM_TEXT, LONG_TEXT ]
-    for (const payload of testPayloads) {
-        it(`can download ${payload.length} bytes`, async () => {
-            this.payload = payload
-            const buf = new StringWriter()
-            await this.client.downloadTo(buf, FILENAME)
-            assert.deepEqual(buf.getText("utf-8"), payload)
-        })
+    function sendCompleteList() {
+        client.ftp.socket.emit("data", "125 Sending");
+        client.ftp.dataSocket.emit("data", bufList);
+        client.ftp.dataSocket.end()
+        client.ftp.socket.emit("data", "250 Done");
     }
-    
-    it("handles early destination stream error", () => {
-        return this.client.downloadTo(fs.createWriteStream("test"), "test.json")
-        .then(() => assert.fail("exception expected"))
-        .catch(err => {
-            const expected = "EISDIR: illegal operation on a directory, open 'test'"
-            assert(err.message.includes(expected), `${err.message} should include "${expected}"`)
-        })
-    })
 
-    it("handles late destination stream error", async () => {
-        this.server.addHandlers({
-            "pasv": () => `227 Entering Passive Mode (${this.server.dataAddressForPasvResponse})`,
-            "retr": ({arg}) => {
-                setTimeout(() => this.server.dataConn.write("one..."))
-                return arg === FILENAME ? "150 Ready to download" : "500 Wrong filename"
-            }
-        })
-        const writable = new Writable()
-        writable._write = (chunk, enc, cb) => {
-            cb()
-            writable.destroy(new Error("local disk full"))
+    function requestListAndVerify() {
+        return client.list().then(result => {
+            assert.deepEqual(result, expList);
+        });
+    }
+
+    it("handles data socket ending before control confirms", function() {
+        setTimeout(() => {
+            client.ftp.socket.emit("data", "125 Sending");
+            client.ftp.dataSocket.emit("data", bufList);
+            client.ftp.dataSocket.end();
+            client.ftp.socket.emit("data", "250 Done");
+        });
+        return requestListAndVerify();
+    });
+
+    it("handles control confirming before data socket ends", function() {
+        setTimeout(() => {
+            client.ftp.socket.emit("data", "125 Sending");
+            client.ftp.socket.emit("data", "250 Done");
+            client.ftp.dataSocket.emit("data", bufList);
+            client.ftp.dataSocket.end();
+        });
+        return requestListAndVerify();
+    });
+
+    it("handles data coming in before control announces beginning", function() {
+        setTimeout(() => {
+            client.ftp.dataSocket.emit("data", bufList);
+            client.ftp.socket.emit("data", "125 Sending");
+            client.ftp.dataSocket.end();
+            client.ftp.socket.emit("data", "250 Done");
+        });
+        return requestListAndVerify();
+    });
+
+    it("handles data transmission being complete before control announces beginning", function() {
+        setTimeout(() => {
+            client.ftp.dataSocket.emit("data", bufList);
+            client.ftp.dataSocket.end();
+            client.ftp.socket.emit("data", "125 Sending");
+            client.ftp.socket.emit("data", "250 Done");
+        });
+        return requestListAndVerify();
+    });
+
+    it("handles control announcing with 150 instead of 125", function() {
+        setTimeout(() => {
+            client.ftp.socket.emit("data", "150 Sending");
+            client.ftp.dataSocket.emit("data", bufList);
+            client.ftp.dataSocket.end();
+            client.ftp.socket.emit("data", "250 Done");
+        });
+        return requestListAndVerify();
+    });
+
+    it("handles control confirming end with 200 instead of 250", function() {
+        setTimeout(() => {
+            client.ftp.socket.emit("data", "125 Sending");
+            client.ftp.dataSocket.emit("data", bufList);
+            client.ftp.dataSocket.end();
+            client.ftp.socket.emit("data", "200 Done");
+        });
+        return requestListAndVerify();
+    });
+
+    it("relays FTP error response even if data transmitted completely", function() {
+        setTimeout(() => {
+            client.ftp.socket.emit("data", "125 Sending");
+            client.ftp.dataSocket.emit("data", bufList);
+            client.ftp.dataSocket.end();
+            client.ftp.socket.emit("data", "500 Error");
+        });
+        client.availableListCommands = ["LIST"]
+        return client.list().catch(err => {
+            assert.deepEqual(err, new FTPError({code: 500, message: "500 Error"}));
+        });
+    });
+
+    it("uses data connection exclusively for timeout tracking during download", function(done) {
+        client.list().catch(() => {});
+        // Before anything: No timeout tracking at all
+        assert.equal(client.ftp.socket.timeout, 0, "before task (control)");
+        if (client.ftp.dataSocket) { // Data socket might not even be set yet
+            assert.equal(client.ftp.dataSocket.timeout, 0, "before task (data)");
         }
-        return assert.rejects(() => this.client.downloadTo(writable, FILENAME), {
-            message: "local disk full"
+        setTimeout(() => {
+            // Task started, control socket tracks timeout
+            assert.equal(client.ftp.socket.timeout, 5000, "task started (control)");
+            assert.equal(client.ftp.dataSocket.timeout, 0, "task started (data)");
+            // Data transfer will start, data socket tracks timeout
+            client.ftp.socket.emit("data", "125 Sending");
+            assert.equal(client.ftp.socket.timeout, 0, "transfer start (control)");
+            assert.equal(client.ftp.dataSocket.timeout, 5000, "transfer start (data)");
+            // Data transfer is done, control socket tracks timeout
+            client.ftp.dataSocket.end();
+            setTimeout(() => {
+                assert.equal(client.ftp.socket.timeout, 5000, "transfer end (control)");
+                assert.equal(client.ftp.dataSocket.timeout, 0, "transfer end (data)");
+                // Transfer confirmed via control socket, stop tracking timeout altogether
+                client.ftp.socket.emit("data", "250 Done");
+                assert.equal(client.ftp.socket.timeout, 0, "confirmed end (control)");
+                assert.equal(client.ftp.dataSocket, undefined, "data connection");
+                done();
+            })
+        });
+    });
+
+    it("stops tracking timeout after failure", function(done) {
+        client.list().catch(() => {});
+        setTimeout(() => {
+            client.ftp.socket.emit("data", "125 Sending");
+            client.ftp.socket.emit("data", "500 Error");
+            assert.equal(client.ftp.socket.timeout, 0);
+            done();
+        });
+    });
+
+    it("handles destination stream error", function() {
+        return client.download(fs.createWriteStream("test"), "test.json").catch(err => {
+            assert.equal(err.code, "EISDIR")
         })
     })
 
-    it("handles late destination stream closing", async () => {
-        this.server.addHandlers({
-            "pasv": () => `227 Entering Passive Mode (${this.server.dataAddressForPasvResponse})`,
-            "retr": ({arg}) => {
-                setTimeout(() => this.server.dataConn.write("one..."))
-                return arg === FILENAME ? "150 Ready to download" : "500 Wrong filename"
+    it("sends the right default command", function() {
+        client.ftp.socket.once("didSend", command => {
+            assert.equal(command, "MLSD\r\n");
+            sendCompleteList()
+        });
+        // This will throw an unhandled exception because we close the client when
+        // the task is still running. Ignore the exception, this test is only about
+        // the command that client.list() sends.
+        return client.list()
+    });
+
+    it("sends the right default command with optional path", function() {
+        client.ftp.socket.once("didSend", command => {
+            assert.equal(command, "MLSD my/path\r\n", "Unexpected list command");
+            sendCompleteList()
+        });
+        // This will throw an unhandled exception because we close the client when
+        // the task is still running. Ignore the exception, this test is only about
+        // the command that client.list() sends.
+        return client.list("my/path")//.catch(() => true /* Do nothing */);
+    });
+
+    it("tries all other list commands if default one fails", function() {
+        const expectedCandidates = ["MLSD", "LIST -a", "LIST"]
+        client.ftp.socket.on("didSend", command => {
+            const expected = expectedCandidates.shift()
+            assert.equal(command, expected + "\r\n", "Unexpected list command candidate");
+            if (expectedCandidates.length === 0) {
+                sendCompleteList()
             }
-        })
-        const writable = new Writable()
-        writable._write = (chunk, enc, cb) => {
-            cb()
-            // Close destination stream after it received the first chunk
-            writable.emit("close")
-        }
-        return assert.rejects(() => this.client.downloadTo(writable, FILENAME), err => {
-            // Error message can be "Premature close" or "Premature close (data socket)"
-            assert.match(err.message, /Premature close/)
-            return true
-        })
-    })
-
-    it("handles data arriving before control announcing start", async () => {
-        const payload = SHORT_TEXT
-        this.server.addHandlers({
-            "pasv": () => `227 Entering Passive Mode (${this.server.dataAddressForPasvResponse})`,
-            "retr": ({arg}) => {
-                // Sending data and closing stream..
-                this.server.dataConn.write(payload)
-                this.server.dataConn.end()
-                // ..before announcing it
-                return arg === FILENAME ? "150 Ready to download" : "500 Wrong filename"
+            else {
+                client.ftp.socket.emit("data", "501 Syntax error")
             }
-        })
-        const buf = new StringWriter()
-        await this.client.downloadTo(buf, FILENAME)
-        assert.deepEqual(buf.getText("utf-8"), payload)
+        });
+        return client.list();
     })
 
-    it("relays FTP error response even if data transmitted completely", async () => {
-        this.payload = SHORT_TEXT
-        this.server.didCloseDataConn = () => this.server.writeCtrl("500 Error")
-        const buf = new StringWriter()
-        return assert.rejects(() => this.client.downloadTo(buf, FILENAME), {
-            message: "500 Error"
-        }).then(() => {
-            assert.deepEqual(buf.getText("utf-8"), this.payload)
-        })
+    it("throws error of last candidate when all available list commands fail", function() {
+        let counter = 1
+        client.ftp.socket.on("didSend", () => {
+            client.ftp.socket.emit("data", "501 Syntax error " + counter)
+            counter++
+        });
+        return client.list().catch(err => {
+            assert.equal(err.message, "501 Syntax error 3")
+        });
     })
 
-    it("ignores error thrown on data socket after transfer completed successfully", async () => {
-        let dataSocket
-        this.server.addHandlers({
-            "pasv": () => `227 Entering Passive Mode (${this.server.dataAddressForPasvResponse})`,
-            "retr": ({arg}) => {
-                dataSocket = this.client.ftp.dataSocket
-                this.server.dataConn.end("some data")
-                return arg === FILENAME ? "150 Ready to download" : "500 Wrong filename"
-            }
-        })
-        const buf = new StringWriter()
-        await this.client.downloadTo(buf, FILENAME)
-        dataSocket.destroy(new Error("Error that should be ignored because task has completed successfully"))
+    it("uses first successful list command for all subsequent requests", function() {
+        const promise = client.list().then(result => {
+            assert.deepEqual(result, expList);
+            assert.deepEqual(["MLSD"], client.availableListCommands)
+        });
+        setTimeout(() => sendCompleteList());
+        return promise
     })
 
-    it("stops tracking timeout after failure")
-    it("can get a directory listing")
-    it("uses control host IP if suggested data connection IP using PASV is private")
-    it("can download using TLS")
-})
+    it("transparently rethrows list error if only one candidate available", function() {
+        // Typically, only one candidate is available after a successful auto-detection
+        // of a compatible one. If there's an error we want to know about it directly.
+        client.availableListCommands = ["LIST"]
+        client.ftp.socket.on("didSend", () => {
+            client.ftp.socket.emit("data", "501 Syntax error")
+        });
+        return client.list().catch(err => {
+            assert.equal(err.message, "501 Syntax error")
+        });
+    })
+});

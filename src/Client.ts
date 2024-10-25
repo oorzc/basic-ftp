@@ -4,7 +4,7 @@ import { Readable, Writable } from "stream"
 import { connect as connectTLS, ConnectionOptions as TLSConnectionOptions } from "tls"
 import { promisify } from "util"
 import { FileInfo } from "./FileInfo"
-import { FTPContext, FTPError, FTPResponse } from "./FtpContext"
+import { Config, FTPContext, FTPError, FTPResponse } from "./FtpContext"
 import { parseList as parseListAutoDetect } from "./parseList"
 import { ProgressHandler, ProgressTracker } from "./ProgressTracker"
 import { StringWriter } from "./StringWriter"
@@ -67,10 +67,12 @@ export class Client {
     /**
      * Instantiate an FTP client.
      *
-     * @param timeout  Timeout in milliseconds, use 0 for no timeout. Optional, default is 30 seconds.
+     * @param configOrTimeout  Config or Timeout in milliseconds, use 0 for no timeout. Optional, default is 30 seconds.
      */
-    constructor(timeout = 30000) {
-        this.ftp = new FTPContext(timeout)
+    constructor(configOrTimeout: Config | number = 30000) {
+        this.ftp = typeof configOrTimeout === 'number'
+            ? new FTPContext(configOrTimeout, undefined, { timeout: configOrTimeout })
+            : new FTPContext(configOrTimeout.timeout ?? 30000, configOrTimeout.encoding, configOrTimeout)
         this.prepareTransfer = this._enterFirstCompatibleMode([enterPassiveModeIPv6, enterPassiveModeIPv4])
         this.parseList = parseListAutoDetect
         this._progressTracker = new ProgressTracker()
@@ -113,7 +115,7 @@ export class Client {
             port,
             family: this.ftp.ipFamily
         }, () => this.ftp.log(`Connected to ${describeAddress(this.ftp.socket)} (${describeTLS(this.ftp.socket)})`))
-        return this._handleConnectResponse()
+        return this._handleConnectResponse(host, port)
     }
 
     /**
@@ -129,25 +131,27 @@ export class Client {
             () => this.ftp.log(`Connected to ${describeAddress(this.ftp.socket)} (${describeTLS(this.ftp.socket)})`)
         )
         this.ftp.tlsOptions = tlsOptions
-        return this._handleConnectResponse()
+        return this._handleConnectResponse(host, port)
     }
 
     /**
      * Handles the first reponse by an FTP server after the socket connection has been established.
      */
-    private _handleConnectResponse(): Promise<FTPResponse> {
+    private _handleConnectResponse(connectHost: string, port: number): Promise<FTPResponse> {
         return this.ftp.handle(undefined, (res, task) => {
             if (res instanceof Error) {
                 // The connection has been destroyed by the FTPContext at this point.
                 task.reject(res)
             }
             else if (positiveCompletion(res.code)) {
+                this.ftp._setupConnectedTo(connectHost, port)
                 task.resolve(res)
             }
             // Reject all other codes, including 120 "Service ready in nnn minutes".
             else {
                 // Don't stay connected but don't replace the socket yet by using reset()
                 // so the user can inspect properties of this instance.
+                this.ftp.socket.destroy()
                 task.reject(new FTPError(res))
             }
         })
@@ -270,7 +274,7 @@ export class Client {
             // host is set for any future data connection as well.
             const secureOptions = options.secureOptions ?? {}
             secureOptions.host = secureOptions.host ?? options.host
-            await this.useTLS(secureOptions)
+            await this.useTLS(options.secureOptions)
         }
         // Set UTF-8 on before login in case there are non-ascii characters in user or password.
         // Note that this might not work before login depending on server.
@@ -775,7 +779,7 @@ export class Client {
     protected _enterFirstCompatibleMode(strategies: TransferStrategy[]): TransferStrategy {
         return async (ftp: FTPContext) => {
             ftp.log("Trying to find optimal transfer strategy...")
-            let lastError: Error | undefined = undefined
+            let lastError: unknown|Error | undefined = undefined
             for (const strategy of strategies) {
                 try {
                     const res = await strategy(ftp)
@@ -783,7 +787,7 @@ export class Client {
                     this.prepareTransfer = strategy // eslint-disable-line require-atomic-updates
                     return res
                 }
-                catch(err: any) {
+                catch(err) {
                     // Try the next candidate no matter the exact error. It's possible that a server
                     // answered incorrectly to a strategy, for example a PASV answer to an EPSV.
                     lastError = err

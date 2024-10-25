@@ -1,7 +1,7 @@
 # Basic FTP
 
-[![npm version](https://img.shields.io/npm/v/basic-ftp.svg)](https://www.npmjs.com/package/basic-ftp)
-[![npm downloads](https://img.shields.io/npm/dw/basic-ftp)](https://www.npmjs.com/package/basic-ftp)
+[![npm version](https://img.shields.io/npm/v/basic-ftp-proxy.svg)](https://www.npmjs.com/package/basic-ftp-proxy)
+[![npm downloads](https://img.shields.io/npm/dw/basic-ftp-proxy)](https://www.npmjs.com/package/basic-ftp-proxy)
 [![Node.js CI](https://github.com/patrickjuchli/basic-ftp/actions/workflows/nodejs.yml/badge.svg)](https://github.com/patrickjuchli/basic-ftp/actions/workflows/nodejs.yml)
 
 This is an FTP client library for Node.js. It supports FTPS over TLS, Passive Mode over IPv6, has a Promise-based API, and offers methods to operate on whole directories. Active Mode is not supported.
@@ -16,36 +16,41 @@ Node 10.0 or later is the only dependency.
 
 ## Installation
 
-`npm install basic-ftp`
+`npm install basic-ftp-proxy`
 
 ## Usage
 
 The first example will connect to an FTP server using TLS (FTPS), get a directory listing, upload a file and download it as a copy. Note that the FTP protocol doesn't allow multiple requests running in parallel.
 
 ```js
-const { Client } = require("basic-ftp") 
-// ESM: import { Client } from "basic-ftp"
+const { Client } = require("basic-ftp-proxy")
+const proxySocket = require("basic-ftp-proxy/dist/proxySocket")
+// ESM: import { Client } from "basic-ftp-proxy"
 
 example()
 
 async function example() {
-    const client = new Client()
-    client.ftp.verbose = true
-    try {
-        await client.access({
-            host: "myftpserver.com",
-            user: "very",
-            password: "password",
-            secure: true
-        })
-        console.log(await client.list())
-        await client.uploadFrom("README.md", "README_FTP.md")
-        await client.downloadTo("README_COPY.md", "README_FTP.md")
-    }
-    catch(err) {
-        console.log(err)
-    }
-    client.close()
+	const client = new Client({
+		// Set to true if proxy is required
+		useInitialHost: true,
+		// Set the proxy ip and port
+		buildSocket: () => proxySocket.create("127.0.0.1", 7890),
+	})
+	client.ftp.verbose = true
+	try {
+		await client.access({
+			host: "myftpserver.com",
+			user: "very",
+			password: "password",
+			secure: true,
+		})
+		console.log(await client.list())
+		await client.uploadFrom("README.md", "README_FTP.md")
+		await client.downloadTo("README_COPY.md", "README_FTP.md")
+	} catch (err) {
+		console.log(err)
+	}
+	client.close()
 }
 ```
 
@@ -81,12 +86,12 @@ True if the client is not connected to a server. You can reconnect with `access`
 
 Get access to an FTP server. This method will connect to a server, optionally secure the connection with TLS, login a user and apply some default settings (TYPE I, STRU F, PBSZ 0, PROT P). It returns the response of the initial connect command. This is an instance method and thus can be called multiple times during the lifecycle of a `Client` instance. Whenever you do, the client is reset with a new connection. This also implies that you can reopen a `Client` instance that has been closed due to an error when reconnecting with this method. The available options are:
 
-- `host (string)` Server host, default: localhost
-- `port (number)` Server port, default: 21
-- `user (string)` Username, default: anonymous
-- `password (string)` Password, default: guest
-- `secure (boolean | "implicit")` Explicit FTPS over TLS, default: false. Use "implicit" if you need support for legacy implicit FTPS.
-- `secureOptions` Options for TLS, same as for [tls.connect()](https://nodejs.org/api/tls.html#tls_tls_connect_options_callback) in Node.js.
+-   `host (string)` Server host, default: localhost
+-   `port (number)` Server port, default: 21
+-   `user (string)` Username, default: anonymous
+-   `password (string)` Password, default: guest
+-   `secure (boolean | "implicit")` Explicit FTPS over TLS, default: false. Use "implicit" if you need support for legacy implicit FTPS.
+-   `secureOptions` Options for TLS, same as for [tls.connect()](https://nodejs.org/api/tls.html#tls_tls_connect_options_callback) in Node.js.
 
 ---
 
@@ -176,11 +181,11 @@ Set a callback function with `client.trackProgress` to track the progress of any
 
 ```js
 // Log progress for any transfer from now on.
-client.trackProgress(info => {
-    console.log("File", info.name)
-    console.log("Type", info.type)
-    console.log("Transferred", info.bytes)
-    console.log("Transferred Overall", info.bytesOverall)
+client.trackProgress((info) => {
+	console.log("File", info.name)
+	console.log("Type", info.type)
+	console.log("Transferred", info.bytes)
+	console.log("Transferred Overall", info.bytesOverall)
 })
 
 // Transfer some data
@@ -188,7 +193,7 @@ await client.uploadFrom(someStream, "test.txt")
 await client.uploadFrom("somefile.txt", "test2.txt")
 
 // Set a new callback function which also resets the overall counter
-client.trackProgress(info => console.log(info.bytesOverall))
+client.trackProgress((info) => console.log(info.bytesOverall))
 await client.downloadToDir("local/path", "remote/path")
 
 // Stop logging

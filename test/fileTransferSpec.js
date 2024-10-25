@@ -1,97 +1,109 @@
 const assert = require("assert");
+const SocketMock = require("./SocketMock");
 const { Client } = require("../dist");
-const MockFtpServer = require("./MockFtpServer");
-const fs = require("fs");
+const mock = require("mock-fs")
+const fs = require("fs")
 
-const SHORT_TEXT = "This is a short text to download"
-const REMOTE_FILENAME = "file.txt"
-const NEW_LOCAL_FILENAME = "file.txt"
-const EXISTING_LOCAL_FILENAME = "existing.txt"
-const TIMEOUT = 1000
+describe("Download to file", function() {
+    this.timeout(200)
 
-describe("Download to a file", function() {
+    // Mock the filesystem
+    beforeEach(() => mock({
+        "existing.txt": "content"
+    }));
+    afterEach(mock.restore);
 
-    let startAt = 0
-    this.beforeEach(() => {
-        fs.writeFileSync(EXISTING_LOCAL_FILENAME, "content");
+    // Mock an FTP client
+    let client;
+    beforeEach(function() {
+        client = new Client(5000)
+        client.prepareTransfer = ftp => {
+            //@ts-ignore that SocketMock can't be assigned to client.ftp
+            ftp.dataSocket = new SocketMock();
+            //@ts-ignore
+            ftp.dataSocket.connect()
+            return Promise.resolve({code: 200, message: "OK"});
+        };
+        //@ts-ignore
+        client.ftp.socket = new SocketMock();
+    });
+    afterEach(() => client.close());
 
-        this.payload = SHORT_TEXT
-        this.client = new Client(TIMEOUT)
-        this.server = new MockFtpServer()
-        this.server.addHandlers({
-            "pasv": () => `227 Entering Passive Mode (${this.server.dataAddressForPasvResponse})`,
-            "retr": ({arg}) => {
-                setTimeout(() => {
-                    this.server.dataConn.write(this.payload.substring(startAt))
-                    this.server.dataConn.end()
-                })
-                return arg === REMOTE_FILENAME ? "150 Ready to download" : "500 Wrong filename"
-            },
-            "rest": ({arg}) => {
-                startAt = parseInt(arg, 10)
-                return "350 Restarting"
-            }
-        })
-        return this.client.access({
-            port: this.server.ctrlAddress.port,
-            user: "test",
-            password: "test"
-        })
+    function sendData(str) {
+        client.ftp.socket.emit("data", "125 Sending");
+        client.ftp.dataSocket.emit("data", Buffer.from(str));
+        client.ftp.dataSocket.end();
+        client.ftp.socket.emit("data", "250 Done");
+    }
+
+    it("can download to a new, not yet existing file", async function() {
+        setTimeout(() => sendData("hello"));
+        await client.downloadTo("local.txt", "remote.txt", 0)
+        const content = fs.readFileSync("local.txt", "utf-8")
+        assert.equal(content, "hello")
     })
 
-    this.afterEach(() => {
-        try { fs.unlinkSync(NEW_LOCAL_FILENAME) } catch {}
-        try { fs.unlinkSync(EXISTING_LOCAL_FILENAME) } catch {}
-        this.client.close()
-        this.server.close()
+    it("truncates existing file with startAt=0", async function() {
+        setTimeout(() => sendData("hello"));
+        await client.downloadTo("existing.txt", "remote.txt", 0)
+        const content = fs.readFileSync("existing.txt", "utf-8")
+        assert.equal(content, "hello")
     })
 
-    it("can download to a new, not yet existing file", async () => {
-        await this.client.downloadTo(NEW_LOCAL_FILENAME, REMOTE_FILENAME)
-        const content = fs.readFileSync(NEW_LOCAL_FILENAME, "utf-8")
-        assert.equal(content, SHORT_TEXT)
+    it("appends to existing file with start>0", async function() {
+        setTimeout(() => sendData("hello"));
+        await client.downloadTo("existing.txt", "remote.txt", 4)
+        const content = fs.readFileSync("existing.txt", "utf-8")
+        assert.equal(content, "conthello")
     })
 
-    it("truncates existing file with startAt=0", async () => {
-        await this.client.downloadTo(EXISTING_LOCAL_FILENAME, REMOTE_FILENAME)
-        const content = fs.readFileSync(EXISTING_LOCAL_FILENAME, "utf-8")
-        assert.equal(content, SHORT_TEXT)
+    it("raises an error if appending to non-existing file", async function() {
+        let code = ""
+        try {
+            await client.downloadTo("not_existing.txt", "remote.txt", 4)
+        }
+        catch(err) {
+            code = err.code
+        }
+        assert.equal(code, "ENOENT", "Wrong expected exception")
     })
 
-    it("appends to existing file with start>0", async () => {
-        const startAt = 4
-        await this.client.downloadTo(EXISTING_LOCAL_FILENAME, REMOTE_FILENAME, startAt)
-        const content = fs.readFileSync(EXISTING_LOCAL_FILENAME, "utf-8")
-        assert.equal(content, "cont" + SHORT_TEXT.substring(startAt))
+    it("removes a file on error and if not appending", async function() {
+        setTimeout(() => {
+            assert.equal(fs.existsSync("local.txt"), true, "File created right after method call")
+            client.ftp.socket.emit("data", "500 Big Error");
+        });
+        try {
+            await client.downloadTo("local.txt", "remote.txt")
+        }
+        catch(err) { /*Ignore*/ }
+        assert.equal(fs.existsSync("local.txt"), false, "Empty file removed after error")
     })
 
-    it("raises an error if appending to non-existing file", async () => {
-        return assert.rejects(() => this.client.downloadTo(NEW_LOCAL_FILENAME, REMOTE_FILENAME, 666), {
-            code: "ENOENT"
-        })
+    it("does not remove a file on error if appending", async function() {
+        setTimeout(() => {
+            assert.equal(fs.existsSync("existing.txt"), true, "File exists after method call")
+            assert.equal(fs.readFileSync("existing.txt", "utf-8"), "content", "File untouched after method call")
+            client.ftp.socket.emit("data", "500 Big Error");
+        });
+        try {
+            await client.downloadTo("existing.txt", "remote.txt", 4)
+        }
+        catch(err) { /*Ignore*/ }
+        assert.equal(fs.readFileSync("existing.txt", "utf-8"), "content", "File untouched after error")
     })
 
-    it("removes a file on error and if not appending", async () => {
-        this.server.addHandlers({
-            "pasv": () => {
-                assert.equal(fs.existsSync(NEW_LOCAL_FILENAME), true, "File created right after method call")
-                return "500 Unforseen error"
-            }
-        })
-        return assert.rejects(() => this.client.downloadTo(NEW_LOCAL_FILENAME, REMOTE_FILENAME)).then(() => {
-            assert.equal(fs.existsSync(NEW_LOCAL_FILENAME), false, "Empty file removed after error")
-        })
-    })
-
-    it("does not remove a file on error if appending", async () => {
-        this.server.addHandlers({
-            "pasv": () => {
-                assert.equal(fs.existsSync(EXISTING_LOCAL_FILENAME), true, "File exists")
-                return "500 Unforseen error"
-            }
-        })
-        return assert.rejects(() => this.client.downloadTo(EXISTING_LOCAL_FILENAME, REMOTE_FILENAME, 4)).then(() => {
-            assert.equal(fs.readFileSync(EXISTING_LOCAL_FILENAME, "utf-8"), "content", "File untouched after error")
-        })
+    it("does not remove a file on error if not appending but partial data present", async function() {
+        setTimeout(() => {
+            client.ftp.socket.emit("data", "125 Sending");
+            client.ftp.dataSocket.emit("data", Buffer.from("partialdownload"));
+            client.ftp.socket.emit("data", "500 Big Error");
+        });
+        try {
+            await client.downloadTo("local.txt", "remote.txt")
+        }
+        catch(err) { /*Ignore*/ }
+        assert.equal(fs.existsSync("local.txt"), true, "Non-empty file present after error")
+        assert.equal(fs.readFileSync("local.txt", "utf-8"), "partialdownload", "Non-empty file contains partial content after error")
     })
 })

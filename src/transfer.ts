@@ -21,7 +21,7 @@ export async function enterPassiveModeIPv6(ftp: FTPContext): Promise<FTPResponse
     if (controlHost === undefined) {
         throw new Error("Control socket is disconnected, can't get remote address.")
     }
-    await connectForPassiveTransfer(controlHost, port, ftp)
+    await connectForPassiveTransfer(ftp.config.useInitialHost && ftp.connectedTo.host ? ftp.connectedTo.host : controlHost, port, ftp)
     return res
 }
 
@@ -56,7 +56,9 @@ export async function enterPassiveModeIPv4(ftp: FTPContext): Promise<FTPResponse
     // We can't always perform this replacement because it's possible (although unlikely) that the FTP server
     // indeed uses a different host for data connections.
     const controlHost = ftp.socket.remoteAddress
-    if (ipIsPrivateV4Address(target.host) && controlHost && !ipIsPrivateV4Address(controlHost)) {
+    if (ftp.config.useInitialHost) {
+        target.host = ftp.connectedTo.host
+    } else if (ipIsPrivateV4Address(target.host) && controlHost && !ipIsPrivateV4Address(controlHost)) {
         target.host = controlHost
     }
     await connectForPassiveTransfer(target.host, target.port, ftp)
@@ -81,18 +83,18 @@ export function parsePasvResponse(message: string): { host: string, port: number
 export function connectForPassiveTransfer(host: string, port: number, ftp: FTPContext): Promise<void> {
     return new Promise((resolve, reject) => {
         let socket = ftp._newSocket()
-        const handleConnErr = function(err: Error) {
+        const handleConnErr = function (err: Error) {
             err.message = "Can't open data connection in passive mode: " + err.message
             reject(err)
         }
-        const handleTimeout = function() {
+        const handleTimeout = function () {
             socket.destroy()
             reject(new Error(`Timeout when trying to open data connection to ${host}:${port}`))
         }
         socket.setTimeout(ftp.timeout)
         socket.on("error", handleConnErr)
         socket.on("timeout", handleTimeout)
-        socket.connect({ port, host, family: ftp.ipFamily}, () => {
+        socket.connect({ port, host, family: ftp.ipFamily }, () => {
             if (ftp.socket instanceof TLSSocket) {
                 socket = connectTLS(Object.assign({}, ftp.tlsOptions, {
                     socket,
@@ -136,7 +138,7 @@ class TransferResolver {
     /**
      * Instantiate a TransferResolver
      */
-    constructor(readonly ftp: FTPContext, readonly progress: ProgressTracker) {}
+    constructor(readonly ftp: FTPContext, readonly progress: ProgressTracker) { }
 
     /**
      * Mark the beginning of a transfer.
@@ -236,17 +238,30 @@ export function uploadFrom(source: Readable, config: TransferConfig): Promise<FT
             // If we are using TLS, we have to wait until the dataSocket issued
             // 'secureConnect'. If this hasn't happened yet, getCipher() returns undefined.
             const canUpload = "getCipher" in dataSocket ? dataSocket.getCipher() !== undefined : true
+
+
             onConditionOrEvent(canUpload, dataSocket, "secureConnect", () => {
                 config.ftp.log(`Uploading to ${describeAddress(dataSocket)} (${describeTLS(dataSocket)})`)
                 resolver.onDataStart(config.remotePath, config.type)
+                // source.pipe(dataSocket).once("end", () => {
+                //     dataSocket.destroy()  // Explicitly close/destroy the socket to signal the end.
+                //     resolver.onDataDone(task)
+                // })
+                // source.pipe(dataSocket).on("finish", () => {
+                //     dataSocket.destroy() // Explicitly close/destroy the socket to signal the end.
+                //     resolver.onDataDone(task)
+                // })
+
                 pipeline(source, dataSocket, err => {
                     if (err) {
                         resolver.onError(task, err)
                     } else {
+                        dataSocket.destroy() // Explicitly close/destroy the socket to signal the end.
                         resolver.onDataDone(task)
                     }
                 })
             })
+
         }
         else if (positiveCompletion(res.code)) { // Transfer complete
             resolver.onControlDone(task, res)
@@ -262,6 +277,9 @@ export function downloadTo(destination: Writable, config: TransferConfig): Promi
     if (!config.ftp.dataSocket) {
         throw new Error("Download will be initiated but no data connection is available.")
     }
+    // It's possible that data transmission begins before the control socket
+    // receives the announcement. Start listening for data immediately.
+    config.ftp.dataSocket.pipe(destination)
     const resolver = new TransferResolver(config.ftp, config.tracker)
     return config.ftp.handle(config.command, (res, task) => {
         if (res instanceof Error) {
@@ -275,10 +293,13 @@ export function downloadTo(destination: Writable, config: TransferConfig): Promi
             }
             config.ftp.log(`Downloading from ${describeAddress(dataSocket)} (${describeTLS(dataSocket)})`)
             resolver.onDataStart(config.remotePath, config.type)
+            // onConditionOrEvent(isWritableFinished(destination), destination, "end", () => resolver.onDataDone(task))
+            // onConditionOrEvent(isWritableFinished(destination), destination, "finish", () => resolver.onDataDone(task))
             pipeline(dataSocket, destination, err => {
                 if (err) {
                     resolver.onError(task, err)
                 } else {
+                    dataSocket.destroy() // Explicitly close/destroy the socket to signal the end.
                     resolver.onDataDone(task)
                 }
             })
