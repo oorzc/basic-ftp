@@ -1,6 +1,6 @@
 {
   "name": "basic-ftp-proxy",
-  "version": "5.0.5-4",
+  "version": "5.0.5-5",
   "description": "FTP client for Node.js, supports FTPS over TLS, IPv6, Async/Await, and Typescript.",
   "main": "dist/index",
   "types": "dist/index",

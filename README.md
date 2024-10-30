@@ -25,7 +25,10 @@ The first example will connect to an FTP server using TLS (FTPS), get a director
 ```js
 const { Client } = require("basic-ftp-proxy")
 const proxySocket = require("basic-ftp-proxy/dist/proxySocket")
-// ESM: import { Client } from "basic-ftp-proxy"
+
+// ESM
+// import { Client } from "basic-ftp-proxy"
+// import proxySocket from "basic-ftp-proxy/dist/proxySocket"
 
 example()
 

@@ -247,10 +247,10 @@ export function uploadFrom(source: Readable, config: TransferConfig): Promise<FT
                     dataSocket.destroy()  // Explicitly close/destroy the socket to signal the end.
                     resolver.onDataDone(task)
                 })
-                source.pipe(dataSocket).on("finish", () => {
-                    dataSocket.destroy() // Explicitly close/destroy the socket to signal the end.
-                    resolver.onDataDone(task)
-                })
+                // source.pipe(dataSocket).on("finish", () => {
+                //     dataSocket.destroy() // Explicitly close/destroy the socket to signal the end.
+                //     resolver.onDataDone(task)
+                // })
 
                 // pipeline(source, dataSocket, err => {
                 //     if (err) {
@@ -293,8 +293,9 @@ export function downloadTo(destination: Writable, config: TransferConfig): Promi
             }
             config.ftp.log(`Downloading from ${describeAddress(dataSocket)} (${describeTLS(dataSocket)})`)
             resolver.onDataStart(config.remotePath, config.type)
-            onConditionOrEvent(isWritableFinished(destination), destination, "end", () => resolver.onDataDone(task))
-            onConditionOrEvent(isWritableFinished(destination), destination, "finish", () => resolver.onDataDone(task))
+            onConditionOrEvent(isWritableFinished(destination), destination, "finish", () => {
+                resolver.onDataDone(task)
+            })
             // pipeline(dataSocket, destination, err => {
             //     if (err) {
             //         resolver.onError(task, err)
